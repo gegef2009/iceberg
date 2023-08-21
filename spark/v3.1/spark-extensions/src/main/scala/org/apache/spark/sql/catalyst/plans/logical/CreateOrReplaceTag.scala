@@ -16,23 +16,23 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.iceberg.actions;
+package org.apache.spark.sql.catalyst.plans.logical
 
-/**
- * @deprecated will be removed in 1.4.0; use {@link ImmutableSnapshotTable.Result#builder()}
- *     instead.
- */
-@Deprecated
-public class BaseSnapshotTableActionResult implements SnapshotTable.Result {
+import org.apache.spark.sql.catalyst.expressions.Attribute
 
-  private final long importedDataFilesCount;
+case class CreateOrReplaceTag(
+    table: Seq[String],
+    tag: String,
+    tagOptions: TagOptions,
+    create: Boolean,
+    replace: Boolean,
+    ifNotExists: Boolean) extends Command {
 
-  public BaseSnapshotTableActionResult(long importedDataFilesCount) {
-    this.importedDataFilesCount = importedDataFilesCount;
-  }
+  import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
 
-  @Override
-  public long importedDataFilesCount() {
-    return importedDataFilesCount;
+  override lazy val output: Seq[Attribute] = Nil
+
+  override def simpleString(maxFields: Int): String = {
+    s"CreateOrReplaceTag tag: ${tag} for table: ${table.quoted}"
   }
 }

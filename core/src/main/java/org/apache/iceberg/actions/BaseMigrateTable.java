@@ -18,24 +18,18 @@
  */
 package org.apache.iceberg.actions;
 
-import java.util.List;
-import org.apache.iceberg.actions.RewriteDataFiles.FileGroupRewriteResult;
-import org.apache.iceberg.actions.RewriteDataFiles.Result;
+import org.immutables.value.Value;
+import org.immutables.value.Value.Style.BuilderVisibility;
+import org.immutables.value.Value.Style.ImplementationVisibility;
 
-/**
- * @deprecated will be removed in 1.4.0; use {@link ImmutableRewriteDataFiles.Result#builder()}
- *     instead.
- */
-@Deprecated
-public class BaseRewriteDataFilesResult implements Result {
-  private final List<FileGroupRewriteResult> rewriteResults;
+@Value.Enclosing
+@SuppressWarnings("ImmutablesStyle")
+@Value.Style(
+    typeImmutableEnclosing = "ImmutableMigrateTable",
+    visibility = ImplementationVisibility.PUBLIC,
+    builderVisibility = BuilderVisibility.PUBLIC)
+interface BaseMigrateTable extends MigrateTable {
 
-  public BaseRewriteDataFilesResult(List<FileGroupRewriteResult> rewriteResults) {
-    this.rewriteResults = rewriteResults;
-  }
-
-  @Override
-  public List<FileGroupRewriteResult> rewriteResults() {
-    return rewriteResults;
-  }
+  @Value.Immutable
+  interface Result extends MigrateTable.Result {}
 }

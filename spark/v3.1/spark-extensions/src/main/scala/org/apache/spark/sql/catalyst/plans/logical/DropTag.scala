@@ -16,22 +16,17 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.iceberg.actions;
+package org.apache.spark.sql.catalyst.plans.logical
 
-/**
- * @deprecated will be removed in 1.4.0; use {@link ImmutableMigrateTable.Result#builder()} instead.
- */
-@Deprecated
-public class BaseMigrateTableActionResult implements MigrateTable.Result {
+import org.apache.spark.sql.catalyst.expressions.Attribute
 
-  private final long migratedDataFilesCount;
+case class DropTag(table: Seq[String], tag: String, ifExists: Boolean) extends Command {
 
-  public BaseMigrateTableActionResult(long migratedDataFilesCount) {
-    this.migratedDataFilesCount = migratedDataFilesCount;
-  }
+  import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
 
-  @Override
-  public long migratedDataFilesCount() {
-    return migratedDataFilesCount;
+  override lazy val output: Seq[Attribute] = Nil
+
+  override def simpleString(maxFields: Int): String = {
+    s"DropTag tag: ${tag} for table: ${table.quoted}"
   }
 }
