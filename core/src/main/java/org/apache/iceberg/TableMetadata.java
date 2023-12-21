@@ -50,7 +50,7 @@ import org.apache.iceberg.util.SerializableSupplier;
 public class TableMetadata implements Serializable {
   static final long INITIAL_SEQUENCE_NUMBER = 0;
   static final long INVALID_SEQUENCE_NUMBER = -1;
-  static final int DEFAULT_TABLE_FORMAT_VERSION = 1;
+  static final int DEFAULT_TABLE_FORMAT_VERSION = 2;
   static final int SUPPORTED_TABLE_FORMAT_VERSION = 2;
   static final int INITIAL_SPEC_ID = 0;
   static final int INITIAL_SORT_ORDER_ID = 1;
@@ -68,7 +68,7 @@ public class TableMetadata implements Serializable {
         PropertyUtil.propertyAsInt(
             properties, TableProperties.FORMAT_VERSION, DEFAULT_TABLE_FORMAT_VERSION);
     return newTableMetadata(
-        schema, spec, sortOrder, location, unreservedProperties(properties), formatVersion);
+        schema, spec, sortOrder, location, persistedProperties(properties), formatVersion);
   }
 
   public static TableMetadata newTableMetadata(
@@ -78,13 +78,28 @@ public class TableMetadata implements Serializable {
         PropertyUtil.propertyAsInt(
             properties, TableProperties.FORMAT_VERSION, DEFAULT_TABLE_FORMAT_VERSION);
     return newTableMetadata(
-        schema, spec, sortOrder, location, unreservedProperties(properties), formatVersion);
+        schema, spec, sortOrder, location, persistedProperties(properties), formatVersion);
   }
 
   private static Map<String, String> unreservedProperties(Map<String, String> rawProperties) {
     return rawProperties.entrySet().stream()
         .filter(e -> !TableProperties.RESERVED_PROPERTIES.contains(e.getKey()))
         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+  }
+
+  private static Map<String, String> persistedProperties(Map<String, String> rawProperties) {
+    Map<String, String> persistedProperties = Maps.newHashMap();
+
+    // explicitly set defaults that apply only to new tables
+    persistedProperties.put(
+        TableProperties.PARQUET_COMPRESSION,
+        TableProperties.PARQUET_COMPRESSION_DEFAULT_SINCE_1_4_0);
+
+    rawProperties.entrySet().stream()
+        .filter(entry -> !TableProperties.RESERVED_PROPERTIES.contains(entry.getKey()))
+        .forEach(entry -> persistedProperties.put(entry.getKey(), entry.getValue()));
+
+    return persistedProperties;
   }
 
   static TableMetadata newTableMetadata(
@@ -124,7 +139,7 @@ public class TableMetadata implements Serializable {
     MetricsConfig.fromProperties(properties).validateReferencedColumns(schema);
 
     return new Builder()
-        .upgradeFormatVersion(formatVersion)
+        .setInitialFormatVersion(formatVersion)
         .setCurrentSchema(freshSchema, lastColumnId.get())
         .setDefaultPartitionSpec(freshSpec)
         .setDefaultSortOrder(freshSortOrder)
@@ -242,6 +257,7 @@ public class TableMetadata implements Serializable {
   private final List<HistoryEntry> snapshotLog;
   private final List<MetadataLogEntry> previousFiles;
   private final List<StatisticsFile> statisticsFiles;
+  private final List<PartitionStatisticsFile> partitionStatisticsFiles;
   private final List<MetadataUpdate> changes;
   private SerializableSupplier<List<Snapshot>> snapshotsSupplier;
   private volatile List<Snapshot> snapshots;
@@ -273,6 +289,7 @@ public class TableMetadata implements Serializable {
       List<MetadataLogEntry> previousFiles,
       Map<String, SnapshotRef> refs,
       List<StatisticsFile> statisticsFiles,
+      List<PartitionStatisticsFile> partitionStatisticsFiles,
       List<MetadataUpdate> changes) {
     Preconditions.checkArgument(
         specs != null && !specs.isEmpty(), "Partition specs cannot be null or empty");
@@ -323,6 +340,7 @@ public class TableMetadata implements Serializable {
     this.sortOrdersById = indexSortOrders(sortOrders);
     this.refs = validateRefs(currentSnapshotId, refs, snapshotsById);
     this.statisticsFiles = ImmutableList.copyOf(statisticsFiles);
+    this.partitionStatisticsFiles = ImmutableList.copyOf(partitionStatisticsFiles);
 
     HistoryEntry last = null;
     for (HistoryEntry logEntry : snapshotLog) {
@@ -522,6 +540,10 @@ public class TableMetadata implements Serializable {
     return statisticsFiles;
   }
 
+  public List<PartitionStatisticsFile> partitionStatisticsFiles() {
+    return partitionStatisticsFiles;
+  }
+
   public List<HistoryEntry> snapshotLog() {
     return snapshotLog;
   }
@@ -685,7 +707,7 @@ public class TableMetadata implements Serializable {
         .setDefaultPartitionSpec(freshSpec)
         .setDefaultSortOrder(freshSortOrder)
         .setLocation(newLocation)
-        .setProperties(unreservedProperties(updatedProperties))
+        .setProperties(persistedProperties(updatedProperties))
         .build();
   }
 
@@ -863,6 +885,7 @@ public class TableMetadata implements Serializable {
     private SerializableSupplier<List<Snapshot>> snapshotsSupplier;
     private final Map<String, SnapshotRef> refs;
     private final Map<Long, List<StatisticsFile>> statisticsFiles;
+    private final Map<Long, List<PartitionStatisticsFile>> partitionStatisticsFiles;
 
     // change tracking
     private final List<MetadataUpdate> changes;
@@ -900,6 +923,7 @@ public class TableMetadata implements Serializable {
       this.previousFiles = Lists.newArrayList();
       this.refs = Maps.newHashMap();
       this.statisticsFiles = Maps.newHashMap();
+      this.partitionStatisticsFiles = Maps.newHashMap();
       this.snapshotsById = Maps.newHashMap();
       this.schemasById = Maps.newHashMap();
       this.specsById = Maps.newHashMap();
@@ -931,9 +955,8 @@ public class TableMetadata implements Serializable {
       this.previousFileLocation = base.metadataFileLocation;
       this.previousFiles = base.previousFiles;
       this.refs = Maps.newHashMap(base.refs);
-      this.statisticsFiles =
-          base.statisticsFiles.stream().collect(Collectors.groupingBy(StatisticsFile::snapshotId));
-
+      this.statisticsFiles = indexStatistics(base.statisticsFiles);
+      this.partitionStatisticsFiles = indexPartitionStatistics(base.partitionStatisticsFiles);
       this.snapshotsById = Maps.newHashMap(base.snapshotsById);
       this.schemasById = Maps.newHashMap(base.schemasById);
       this.specsById = Maps.newHashMap(base.specsById);
@@ -962,6 +985,18 @@ public class TableMetadata implements Serializable {
         changes.add(new MetadataUpdate.AssignUUID(uuid));
       }
 
+      return this;
+    }
+
+    // it is only safe to set the format version directly while creating tables
+    // in all other cases, use upgradeFormatVersion
+    private Builder setInitialFormatVersion(int newFormatVersion) {
+      Preconditions.checkArgument(
+          newFormatVersion <= SUPPORTED_TABLE_FORMAT_VERSION,
+          "Unsupported format version: v%s (supported: v%s)",
+          newFormatVersion,
+          SUPPORTED_TABLE_FORMAT_VERSION);
+      this.formatVersion = newFormatVersion;
       return this;
     }
 
@@ -1129,7 +1164,9 @@ public class TableMetadata implements Serializable {
           snapshot.snapshotId());
 
       ValidationException.check(
-          formatVersion == 1 || snapshot.sequenceNumber() > lastSequenceNumber,
+          formatVersion == 1
+              || snapshot.sequenceNumber() > lastSequenceNumber
+              || snapshot.parentId() == null,
           "Cannot add snapshot with sequence number %s older than last sequence number %s",
           snapshot.sequenceNumber(),
           lastSequenceNumber);
@@ -1233,11 +1270,44 @@ public class TableMetadata implements Serializable {
     }
 
     public Builder removeStatistics(long snapshotId) {
-      Preconditions.checkNotNull(snapshotId, "snapshotId is null");
       if (statisticsFiles.remove(snapshotId) == null) {
         return this;
       }
       changes.add(new MetadataUpdate.RemoveStatistics(snapshotId));
+      return this;
+    }
+
+    /**
+     * Suppresses snapshots that are historical, removing the metadata for lazy snapshot loading.
+     *
+     * <p>Note that the snapshots are not considered removed from metadata and no RemoveSnapshot
+     * changes are created.
+     *
+     * <p>A snapshot is historical if no ref directly references its ID.
+     *
+     * @return this for method chaining
+     */
+    public Builder suppressHistoricalSnapshots() {
+      Set<Long> refSnapshotIds =
+          refs.values().stream().map(SnapshotRef::snapshotId).collect(Collectors.toSet());
+      Set<Long> suppressedSnapshotIds = Sets.difference(snapshotsById.keySet(), refSnapshotIds);
+      rewriteSnapshotsInternal(suppressedSnapshotIds, true);
+      return this;
+    }
+
+    public Builder setPartitionStatistics(PartitionStatisticsFile file) {
+      Preconditions.checkNotNull(file, "partition statistics file is null");
+      partitionStatisticsFiles.put(file.snapshotId(), ImmutableList.of(file));
+      changes.add(new MetadataUpdate.SetPartitionStatistics(file));
+      return this;
+    }
+
+    public Builder removePartitionStatistics(long snapshotId) {
+      if (partitionStatisticsFiles.remove(snapshotId) == null) {
+        return this;
+      }
+
+      changes.add(new MetadataUpdate.RemovePartitionStatistics(snapshotId));
       return this;
     }
 
@@ -1248,14 +1318,30 @@ public class TableMetadata implements Serializable {
     }
 
     public Builder removeSnapshots(Collection<Long> idsToRemove) {
+      return rewriteSnapshotsInternal(idsToRemove, false);
+    }
+
+    /**
+     * Rewrite this builder's snapshots by removing the snapshots for a list of IDs.
+     *
+     * <p>If suppress is true, changes are not created.
+     *
+     * @param idsToRemove collection of snapshot IDs to remove from this builder
+     * @param suppress whether the operation is suppressing snapshots (retains history) or removing
+     * @return this for method chaining
+     */
+    private Builder rewriteSnapshotsInternal(Collection<Long> idsToRemove, boolean suppress) {
       List<Snapshot> retainedSnapshots =
           Lists.newArrayListWithExpectedSize(snapshots.size() - idsToRemove.size());
       for (Snapshot snapshot : snapshots) {
         long snapshotId = snapshot.snapshotId();
         if (idsToRemove.contains(snapshotId)) {
           snapshotsById.remove(snapshotId);
-          changes.add(new MetadataUpdate.RemoveSnapshot(snapshotId));
+          if (!suppress) {
+            changes.add(new MetadataUpdate.RemoveSnapshot(snapshotId));
+          }
           removeStatistics(snapshotId);
+          removePartitionStatistics(snapshotId);
         } else {
           retainedSnapshots.add(snapshot);
         }
@@ -1321,7 +1407,7 @@ public class TableMetadata implements Serializable {
 
     private boolean hasChanges() {
       return changes.size() != startingChangeCount
-          || (discardChanges && changes.size() > 0)
+          || (discardChanges && !changes.isEmpty())
           || metadataLocation != null;
     }
 
@@ -1381,6 +1467,9 @@ public class TableMetadata implements Serializable {
           ImmutableList.copyOf(metadataHistory),
           ImmutableMap.copyOf(refs),
           statisticsFiles.values().stream().flatMap(List::stream).collect(Collectors.toList()),
+          partitionStatisticsFiles.values().stream()
+              .flatMap(List::stream)
+              .collect(Collectors.toList()),
           discardChanges ? ImmutableList.of() : ImmutableList.copyOf(changes));
     }
 
@@ -1597,6 +1686,14 @@ public class TableMetadata implements Serializable {
     /**
      * Finds intermediate snapshots that have not been committed as the current snapshot.
      *
+     * <p>Transactions can create snapshots that are never the current snapshot because several
+     * changes are combined by the transaction into one table metadata update. when each
+     * intermediate snapshot is added to table metadata, it is added to the snapshot log, assuming
+     * that it will be the current snapshot. when there are multiple snapshot updates, the log must
+     * be corrected by suppressing the intermediate snapshot entries.
+     *
+     * <p>A snapshot is an intermediate snapshot if it was added but is not the current snapshot.
+     *
      * @return a set of snapshot ids for all added snapshots that were later replaced as the current
      *     snapshot in changes
      */
@@ -1628,19 +1725,14 @@ public class TableMetadata implements Serializable {
         Map<Long, Snapshot> snapshotsById,
         long currentSnapshotId,
         List<MetadataUpdate> changes) {
-      // find intermediate snapshots to suppress incorrect entries in the snapshot log.
-      //
-      // transactions can create snapshots that are never the current snapshot because several
-      // changes are combined
-      // by the transaction into one table metadata update. when each intermediate snapshot is added
-      // to table metadata,
-      // it is added to the snapshot log, assuming that it will be the current snapshot. when there
-      // are multiple
-      // snapshot updates, the log must be corrected by suppressing the intermediate snapshot
-      // entries.
-      //
-      // a snapshot is an intermediate snapshot if it was added but is not the current snapshot.
       Set<Long> intermediateSnapshotIds = intermediateSnapshotIdSet(changes, currentSnapshotId);
+      boolean hasIntermediateSnapshots = !intermediateSnapshotIds.isEmpty();
+      boolean hasRemovedSnapshots =
+          changes.stream().anyMatch(MetadataUpdate.RemoveSnapshot.class::isInstance);
+
+      if (!hasIntermediateSnapshots && !hasRemovedSnapshots) {
+        return snapshotLog;
+      }
 
       // update the snapshot log
       List<HistoryEntry> newSnapshotLog = Lists.newArrayList();
@@ -1651,7 +1743,7 @@ public class TableMetadata implements Serializable {
             // copy the log entries that are still valid
             newSnapshotLog.add(logEntry);
           }
-        } else {
+        } else if (hasRemovedSnapshots) {
           // any invalid entry causes the history before it to be removed. otherwise, there could be
           // history gaps that cause time-travel queries to produce incorrect results. for example,
           // if history is [(t1, s1), (t2, s2), (t3, s3)] and s2 is removed, the history cannot be
@@ -1668,6 +1760,15 @@ public class TableMetadata implements Serializable {
       }
 
       return newSnapshotLog;
+    }
+
+    private static Map<Long, List<StatisticsFile>> indexStatistics(List<StatisticsFile> files) {
+      return files.stream().collect(Collectors.groupingBy(StatisticsFile::snapshotId));
+    }
+
+    private static Map<Long, List<PartitionStatisticsFile>> indexPartitionStatistics(
+        List<PartitionStatisticsFile> files) {
+      return files.stream().collect(Collectors.groupingBy(PartitionStatisticsFile::snapshotId));
     }
 
     private boolean isAddedSnapshot(long snapshotId) {

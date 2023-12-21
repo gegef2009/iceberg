@@ -23,28 +23,37 @@ import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import java.io.IOException;
 import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
 import org.apache.iceberg.AppendFiles;
+import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
-public class HiveCreateReplaceTableTest extends HiveMetastoreTest {
+public class HiveCreateReplaceTableTest {
 
+  private static final String DB_NAME = "hivedb";
   private static final String TABLE_NAME = "tbl";
   private static final TableIdentifier TABLE_IDENTIFIER = TableIdentifier.of(DB_NAME, TABLE_NAME);
   private static final Schema SCHEMA =
@@ -56,8 +65,27 @@ public class HiveCreateReplaceTableTest extends HiveMetastoreTest {
 
   private String tableLocation;
 
+  @RegisterExtension
+  private static final HiveMetastoreExtension HIVE_METASTORE_EXTENSION =
+      HiveMetastoreExtension.builder().withDatabase(DB_NAME).build();
+
+  private static HiveCatalog catalog;
+
+  @BeforeAll
+  public static void initCatalog() {
+    catalog =
+        (HiveCatalog)
+            CatalogUtil.loadCatalog(
+                HiveCatalog.class.getName(),
+                CatalogUtil.ICEBERG_CATALOG_TYPE_HIVE,
+                ImmutableMap.of(
+                    CatalogProperties.CLIENT_POOL_CACHE_EVICTION_INTERVAL_MS,
+                    String.valueOf(TimeUnit.SECONDS.toMillis(10))),
+                HIVE_METASTORE_EXTENSION.hiveConf());
+  }
+
   @BeforeEach
-  public void createTableLocation() throws IOException {
+  public void createTableLocation() {
     tableLocation = temp.resolve("hive-").toString();
   }
 
@@ -143,20 +171,30 @@ public class HiveCreateReplaceTableTest extends HiveMetastoreTest {
         .hasMessage("Table already exists: hivedb.tbl");
   }
 
-  @Test
-  public void testReplaceTableTxn() {
-    catalog.createTable(TABLE_IDENTIFIER, SCHEMA, SPEC, tableLocation, Maps.newHashMap());
+  @ParameterizedTest
+  @ValueSource(ints = {1, 2})
+  public void testReplaceTableTxn(int formatVersion) {
+    catalog.createTable(
+        TABLE_IDENTIFIER,
+        SCHEMA,
+        SPEC,
+        tableLocation,
+        ImmutableMap.of(TableProperties.FORMAT_VERSION, String.valueOf(formatVersion)));
     assertThat(catalog.tableExists(TABLE_IDENTIFIER)).as("Table should exist").isTrue();
 
     Transaction txn = catalog.newReplaceTableTransaction(TABLE_IDENTIFIER, SCHEMA, false);
     txn.commitTransaction();
 
     Table table = catalog.loadTable(TABLE_IDENTIFIER);
-    PartitionSpec v1Expected =
-        PartitionSpec.builderFor(table.schema()).alwaysNull("id", "id").withSpecId(1).build();
-    assertThat(table.spec())
-        .as("Table should have a spec with one void field")
-        .isEqualTo(v1Expected);
+    if (formatVersion == 1) {
+      PartitionSpec v1Expected =
+          PartitionSpec.builderFor(table.schema()).alwaysNull("id", "id").withSpecId(1).build();
+      assertThat(table.spec())
+          .as("Table should have a spec with one void field")
+          .isEqualTo(v1Expected);
+    } else {
+      assertThat(table.spec().isUnpartitioned()).as("Table spec must be unpartitioned").isTrue();
+    }
   }
 
   @Test
@@ -217,20 +255,30 @@ public class HiveCreateReplaceTableTest extends HiveMetastoreTest {
     assertThat(table.properties()).as("Table props should match").containsEntry("prop", "value");
   }
 
-  @Test
-  public void testCreateOrReplaceTableTxnTableExists() {
-    catalog.createTable(TABLE_IDENTIFIER, SCHEMA, SPEC, tableLocation, Maps.newHashMap());
+  @ParameterizedTest
+  @ValueSource(ints = {1, 2})
+  public void testCreateOrReplaceTableTxnTableExists(int formatVersion) {
+    catalog.createTable(
+        TABLE_IDENTIFIER,
+        SCHEMA,
+        SPEC,
+        tableLocation,
+        ImmutableMap.of(TableProperties.FORMAT_VERSION, String.valueOf(formatVersion)));
     assertThat(catalog.tableExists(TABLE_IDENTIFIER)).as("Table should exist").isTrue();
 
     Transaction txn = catalog.newReplaceTableTransaction(TABLE_IDENTIFIER, SCHEMA, true);
     txn.commitTransaction();
 
     Table table = catalog.loadTable(TABLE_IDENTIFIER);
-    PartitionSpec v1Expected =
-        PartitionSpec.builderFor(table.schema()).alwaysNull("id", "id").withSpecId(1).build();
-    assertThat(table.spec())
-        .as("Table should have a spec with one void field")
-        .isEqualTo(v1Expected);
+    if (formatVersion == 1) {
+      PartitionSpec v1Expected =
+          PartitionSpec.builderFor(table.schema()).alwaysNull("id", "id").withSpecId(1).build();
+      assertThat(table.spec())
+          .as("Table should have a spec with one void field")
+          .isEqualTo(v1Expected);
+    } else {
+      assertThat(table.spec().isUnpartitioned()).as("Table spec must be unpartitioned").isTrue();
+    }
   }
 
   @Test

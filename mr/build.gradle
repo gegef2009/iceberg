@@ -23,6 +23,9 @@ project(':iceberg-mr') {
       exclude group: 'org.apache.parquet', module: 'parquet-hadoop-bundle'
     }
   }
+  test {
+    useJUnitPlatform()
+  }
 
   dependencies {
     implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
@@ -38,10 +41,7 @@ project(':iceberg-mr') {
       exclude group: 'org.apache.avro', module: 'avro'
     }
 
-    compileOnly(libs.hive2.exec) {
-      artifact {
-        classifier = 'core'
-      }
+    compileOnly("${libs.hive2.exec.get().module}:${libs.hive2.exec.get().getVersion()}:core") {
       exclude group: 'com.google.code.findbugs', module: 'jsr305'
       exclude group: 'com.google.guava'
       exclude group: 'com.google.protobuf', module: 'protobuf-java'

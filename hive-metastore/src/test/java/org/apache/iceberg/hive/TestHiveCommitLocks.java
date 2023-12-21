@@ -18,6 +18,8 @@
  */
 package org.apache.iceberg.hive;
 
+import static org.apache.iceberg.PartitionSpec.builderFor;
+import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.any;
@@ -27,6 +29,8 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.spy;
@@ -42,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
 import org.apache.hadoop.hive.metastore.IMetaStoreClient;
@@ -51,9 +56,14 @@ import org.apache.hadoop.hive.metastore.api.LockResponse;
 import org.apache.hadoop.hive.metastore.api.LockState;
 import org.apache.hadoop.hive.metastore.api.ShowLocksResponse;
 import org.apache.hadoop.hive.metastore.api.ShowLocksResponseElement;
+import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.HasTableOperations;
+import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.hadoop.ConfigProperties;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
@@ -61,14 +71,17 @@ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Types;
 import org.apache.thrift.TException;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.mockito.AdditionalAnswers;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
 import org.mockito.invocation.InvocationOnMock;
 
-public class TestHiveCommitLocks extends HiveTableBaseTest {
+public class TestHiveCommitLocks {
   private static HiveTableOperations spyOps = null;
   private static HiveClientPool spyClientPool = null;
   private static CachedClientPool spyCachedClientPool = null;
@@ -85,13 +98,37 @@ public class TestHiveCommitLocks extends HiveTableBaseTest {
   LockResponse notAcquiredLockResponse = new LockResponse(dummyLockId, LockState.NOT_ACQUIRED);
   ShowLocksResponse emptyLocks = new ShowLocksResponse(Lists.newArrayList());
 
+  private static final String DB_NAME = "hivedb";
+  private static final String TABLE_NAME = "tbl";
+  private static final Schema schema =
+      new Schema(Types.StructType.of(required(1, "id", Types.LongType.get())).fields());
+  private static final PartitionSpec partitionSpec = builderFor(schema).identity("id").build();
+  static final TableIdentifier TABLE_IDENTIFIER = TableIdentifier.of(DB_NAME, TABLE_NAME);
+
+  @RegisterExtension
+  private static final HiveMetastoreExtension HIVE_METASTORE_EXTENSION =
+      HiveMetastoreExtension.builder()
+          .withDatabase(DB_NAME)
+          .withConfig(ImmutableMap.of(HiveConf.ConfVars.HIVE_TXN_TIMEOUT.varname, "1s"))
+          .build();
+
+  private static HiveCatalog catalog;
+  private Path tableLocation;
+
   @BeforeAll
-  public static void startMetastore() throws Exception {
-    HiveMetastoreTest.startMetastore(
-        ImmutableMap.of(HiveConf.ConfVars.HIVE_TXN_TIMEOUT.varname, "1s"));
+  public static void initCatalog() throws Exception {
+    catalog =
+        (HiveCatalog)
+            CatalogUtil.loadCatalog(
+                HiveCatalog.class.getName(),
+                CatalogUtil.ICEBERG_CATALOG_TYPE_HIVE,
+                ImmutableMap.of(
+                    CatalogProperties.CLIENT_POOL_CACHE_EVICTION_INTERVAL_MS,
+                    String.valueOf(TimeUnit.SECONDS.toMillis(10))),
+                HIVE_METASTORE_EXTENSION.hiveConf());
 
     // start spies
-    overriddenHiveConf = new Configuration(hiveConf);
+    overriddenHiveConf = new Configuration(HIVE_METASTORE_EXTENSION.hiveConf());
     overriddenHiveConf.setLong("iceberg.hive.lock-timeout-ms", 6 * 1000);
     overriddenHiveConf.setLong("iceberg.hive.lock-check-min-wait-ms", 50);
     overriddenHiveConf.setLong("iceberg.hive.lock-check-max-wait-ms", 5 * 1000);
@@ -104,14 +141,16 @@ public class TestHiveCommitLocks extends HiveTableBaseTest {
         .thenAnswer(
             invocation -> {
               // cannot spy on RetryingHiveMetastoreClient as it is a proxy
-              IMetaStoreClient client = spy(new HiveMetaStoreClient(hiveConf));
+              IMetaStoreClient client =
+                  spy(new HiveMetaStoreClient(HIVE_METASTORE_EXTENSION.hiveConf()));
               spyClientRef.set(client);
               return spyClientRef.get();
             });
 
     spyClientPool.run(IMetaStoreClient::isLocalMetaStore); // To ensure new client is created.
 
-    spyCachedClientPool = spy(new CachedClientPool(hiveConf, Collections.emptyMap()));
+    spyCachedClientPool =
+        spy(new CachedClientPool(HIVE_METASTORE_EXTENSION.hiveConf(), Collections.emptyMap()));
     when(spyCachedClientPool.clientPool()).thenAnswer(invocation -> spyClientPool);
 
     assertThat(spyClientRef.get()).isNotNull();
@@ -121,6 +160,8 @@ public class TestHiveCommitLocks extends HiveTableBaseTest {
 
   @BeforeEach
   public void before() throws Exception {
+    this.tableLocation =
+        new Path(catalog.createTable(TABLE_IDENTIFIER, schema, partitionSpec).location());
     Table table = catalog.loadTable(TABLE_IDENTIFIER);
     ops = (HiveTableOperations) ((HasTableOperations) table).operations();
     String dbName = TABLE_IDENTIFIER.namespace().level(0);
@@ -146,6 +187,13 @@ public class TestHiveCommitLocks extends HiveTableBaseTest {
                 dbName,
                 tableName));
     reset(spyClient);
+  }
+
+  @AfterEach
+  public void dropTestTable() throws Exception {
+    // drop the table data
+    tableLocation.getFileSystem(HIVE_METASTORE_EXTENSION.hiveConf()).delete(tableLocation, true);
+    catalog.dropTable(TABLE_IDENTIFIER, false /* metadata only, location was already deleted */);
   }
 
   @AfterAll
@@ -202,6 +250,7 @@ public class TestHiveCommitLocks extends HiveTableBaseTest {
 
     spyOps.doCommit(metadataV2, metadataV1);
 
+    verify(spyClient, times(1)).showLocks(any()); // Make sure HiveLock's findLock method is called
     assertThat(spyOps.current().schema().columns()).hasSize(1); // should be 1 again
   }
 
@@ -226,6 +275,7 @@ public class TestHiveCommitLocks extends HiveTableBaseTest {
 
     spyOps.doCommit(metadataV2, metadataV1);
 
+    verify(spyClient, times(1)).showLocks(any()); // Make sure HiveLock's findLock method is called
     assertThat(spyOps.current().schema().columns()).hasSize(1); // should be 1 again
   }
 
@@ -412,6 +462,32 @@ public class TestHiveCommitLocks extends HiveTableBaseTest {
         .isInstanceOf(RuntimeException.class)
         .hasMessage(
             "org.apache.iceberg.hive.LockException: Metastore operation failed for hivedb.tbl");
+  }
+
+  @Test
+  public void testPassThroughThriftExceptionsForHiveVersion_1()
+      throws TException, InterruptedException {
+    try (MockedStatic<HiveVersion> ignore = mockStatic(HiveVersion.class)) {
+      // default order is 0, meets the requirements of this test
+      HiveVersion version = mock(HiveVersion.class);
+      when(HiveVersion.current()).thenReturn(version);
+
+      doReturn(emptyLocks).when(spyClient).showLocks(any());
+      doThrow(new TException("Failed to connect to HMS"))
+          .doReturn(waitLockResponse)
+          .when(spyClient)
+          .lock(any());
+      doReturn(waitLockResponse)
+          .doReturn(acquiredLockResponse)
+          .when(spyClient)
+          .checkLock(eq(dummyLockId));
+      doNothing().when(spyClient).heartbeat(eq(0L), eq(dummyLockId));
+
+      assertThatThrownBy(() -> spyOps.doCommit(metadataV2, metadataV1))
+          .isInstanceOf(CommitFailedException.class)
+          .hasMessage(
+              "org.apache.iceberg.hive.LockException: Failed to find lock for table hivedb.tbl");
+    }
   }
 
   @Test

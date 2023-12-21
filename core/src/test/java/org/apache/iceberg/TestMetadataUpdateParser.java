@@ -28,6 +28,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.IntStream;
+import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
@@ -35,6 +36,8 @@ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Streams;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.Pair;
+import org.apache.iceberg.view.ImmutableViewVersion;
+import org.apache.iceberg.view.ViewVersion;
 import org.assertj.core.api.Assertions;
 import org.junit.Assert;
 import org.junit.Rule;
@@ -822,6 +825,106 @@ public class TestMetadataUpdateParser {
         MetadataUpdateParser.toJson(expected));
   }
 
+  /** AddViewVersion */
+  @Test
+  public void testAddViewVersionFromJson() {
+    String action = MetadataUpdateParser.ADD_VIEW_VERSION;
+    long timestamp = 123456789;
+    ViewVersion viewVersion =
+        ImmutableViewVersion.builder()
+            .versionId(23)
+            .timestampMillis(timestamp)
+            .schemaId(4)
+            .putSummary("user", "some-user")
+            .defaultNamespace(Namespace.of("ns"))
+            .build();
+    String json =
+        String.format(
+            "{\"action\":\"%s\",\"view-version\":{\"version-id\":23,\"timestamp-ms\":123456789,\"schema-id\":4,\"summary\":{\"user\":\"some-user\"},\"default-namespace\":[\"ns\"],\"representations\":[]}}",
+            action);
+    MetadataUpdate expected = new MetadataUpdate.AddViewVersion(viewVersion);
+    assertEquals(action, expected, MetadataUpdateParser.fromJson(json));
+  }
+
+  @Test
+  public void testAddViewVersionToJson() {
+    String action = MetadataUpdateParser.ADD_VIEW_VERSION;
+    long timestamp = 123456789;
+    ViewVersion viewVersion =
+        ImmutableViewVersion.builder()
+            .versionId(23)
+            .timestampMillis(timestamp)
+            .schemaId(4)
+            .putSummary("user", "some-user")
+            .defaultNamespace(Namespace.of("ns"))
+            .build();
+    String expected =
+        String.format(
+            "{\"action\":\"%s\",\"view-version\":{\"version-id\":23,\"timestamp-ms\":123456789,\"schema-id\":4,\"summary\":{\"user\":\"some-user\"},\"default-namespace\":[\"ns\"],\"representations\":[]}}",
+            action);
+
+    MetadataUpdate update = new MetadataUpdate.AddViewVersion(viewVersion);
+    Assertions.assertThat(MetadataUpdateParser.toJson(update)).isEqualTo(expected);
+  }
+
+  /** SetCurrentViewVersion */
+  @Test
+  public void testSetCurrentViewVersionFromJson() {
+    String action = MetadataUpdateParser.SET_CURRENT_VIEW_VERSION;
+    String json = String.format("{\"action\":\"%s\",\"view-version-id\":23}", action);
+    MetadataUpdate expected = new MetadataUpdate.SetCurrentViewVersion(23);
+    assertEquals(action, expected, MetadataUpdateParser.fromJson(json));
+  }
+
+  @Test
+  public void testSetCurrentViewVersionToJson() {
+    String action = MetadataUpdateParser.SET_CURRENT_VIEW_VERSION;
+    String expected = String.format("{\"action\":\"%s\",\"view-version-id\":23}", action);
+    MetadataUpdate update = new MetadataUpdate.SetCurrentViewVersion(23);
+    Assertions.assertThat(MetadataUpdateParser.toJson(update)).isEqualTo(expected);
+  }
+
+  @Test
+  public void testSetPartitionStatistics() {
+    String json =
+        "{\"action\":\"set-partition-statistics\","
+            + "\"partition-statistics\":{\"snapshot-id\":1940541653261589030,"
+            + "\"statistics-path\":\"s3://bucket/warehouse/stats1.parquet\","
+            + "\"file-size-in-bytes\":43}}";
+
+    long snapshotId = 1940541653261589030L;
+    MetadataUpdate expected =
+        new MetadataUpdate.SetPartitionStatistics(
+            ImmutableGenericPartitionStatisticsFile.builder()
+                .snapshotId(snapshotId)
+                .path("s3://bucket/warehouse/stats1" + ".parquet")
+                .fileSizeInBytes(43L)
+                .build());
+    assertEquals(
+        MetadataUpdateParser.SET_PARTITION_STATISTICS,
+        expected,
+        MetadataUpdateParser.fromJson(json));
+    Assert.assertEquals(
+        "Set partition statistics should convert to the correct JSON value",
+        json,
+        MetadataUpdateParser.toJson(expected));
+  }
+
+  @Test
+  public void testRemovePartitionStatistics() {
+    String json =
+        "{\"action\":\"remove-partition-statistics\",\"snapshot-id\":1940541653261589030}";
+    MetadataUpdate expected = new MetadataUpdate.RemovePartitionStatistics(1940541653261589030L);
+    assertEquals(
+        MetadataUpdateParser.REMOVE_PARTITION_STATISTICS,
+        expected,
+        MetadataUpdateParser.fromJson(json));
+    Assert.assertEquals(
+        "Remove partition statistics should convert to the correct JSON value",
+        json,
+        MetadataUpdateParser.toJson(expected));
+  }
+
   public void assertEquals(
       String action, MetadataUpdate expectedUpdate, MetadataUpdate actualUpdate) {
     switch (action) {
@@ -873,6 +976,16 @@ public class TestMetadataUpdateParser {
             (MetadataUpdate.RemoveStatistics) expectedUpdate,
             (MetadataUpdate.RemoveStatistics) actualUpdate);
         break;
+      case MetadataUpdateParser.SET_PARTITION_STATISTICS:
+        assertEqualsSetPartitionStatistics(
+            (MetadataUpdate.SetPartitionStatistics) expectedUpdate,
+            (MetadataUpdate.SetPartitionStatistics) actualUpdate);
+        break;
+      case MetadataUpdateParser.REMOVE_PARTITION_STATISTICS:
+        assertEqualsRemovePartitionStatistics(
+            (MetadataUpdate.RemovePartitionStatistics) expectedUpdate,
+            (MetadataUpdate.RemovePartitionStatistics) actualUpdate);
+        break;
       case MetadataUpdateParser.ADD_SNAPSHOT:
         assertEqualsAddSnapshot(
             (MetadataUpdate.AddSnapshot) expectedUpdate, (MetadataUpdate.AddSnapshot) actualUpdate);
@@ -905,6 +1018,16 @@ public class TestMetadataUpdateParser {
       case MetadataUpdateParser.SET_LOCATION:
         assertEqualsSetLocation(
             (MetadataUpdate.SetLocation) expectedUpdate, (MetadataUpdate.SetLocation) actualUpdate);
+        break;
+      case MetadataUpdateParser.ADD_VIEW_VERSION:
+        assertEqualsAddViewVersion(
+            (MetadataUpdate.AddViewVersion) expectedUpdate,
+            (MetadataUpdate.AddViewVersion) actualUpdate);
+        break;
+      case MetadataUpdateParser.SET_CURRENT_VIEW_VERSION:
+        assertEqualsSetCurrentViewVersion(
+            (MetadataUpdate.SetCurrentViewVersion) expectedUpdate,
+            (MetadataUpdate.SetCurrentViewVersion) actualUpdate);
         break;
       default:
         Assert.fail("Unrecognized metadata update action: " + action);
@@ -1062,6 +1185,31 @@ public class TestMetadataUpdateParser {
         "Snapshots to remove should be the same", expected.snapshotId(), actual.snapshotId());
   }
 
+  private static void assertEqualsSetPartitionStatistics(
+      MetadataUpdate.SetPartitionStatistics expected,
+      MetadataUpdate.SetPartitionStatistics actual) {
+    Assert.assertEquals("Snapshot IDs should be equal", expected.snapshotId(), actual.snapshotId());
+    Assert.assertEquals(
+        "Partition Statistics files snapshot IDs should be equal",
+        expected.partitionStatisticsFile().snapshotId(),
+        actual.partitionStatisticsFile().snapshotId());
+    Assert.assertEquals(
+        "Partition statistics files paths should be equal",
+        expected.partitionStatisticsFile().path(),
+        actual.partitionStatisticsFile().path());
+    Assert.assertEquals(
+        "Partition statistics file size should be equal",
+        expected.partitionStatisticsFile().fileSizeInBytes(),
+        actual.partitionStatisticsFile().fileSizeInBytes());
+  }
+
+  private static void assertEqualsRemovePartitionStatistics(
+      MetadataUpdate.RemovePartitionStatistics expected,
+      MetadataUpdate.RemovePartitionStatistics actual) {
+    Assert.assertEquals(
+        "Snapshots to remove should be the same", expected.snapshotId(), actual.snapshotId());
+  }
+
   private static void assertEqualsAddSnapshot(
       MetadataUpdate.AddSnapshot expected, MetadataUpdate.AddSnapshot actual) {
     Assert.assertEquals(
@@ -1145,6 +1293,16 @@ public class TestMetadataUpdateParser {
   private static void assertEqualsSetLocation(
       MetadataUpdate.SetLocation expected, MetadataUpdate.SetLocation actual) {
     Assert.assertEquals("Location should be the same", expected.location(), actual.location());
+  }
+
+  private static void assertEqualsAddViewVersion(
+      MetadataUpdate.AddViewVersion expected, MetadataUpdate.AddViewVersion actual) {
+    Assertions.assertThat(actual.viewVersion()).isEqualTo(expected.viewVersion());
+  }
+
+  private static void assertEqualsSetCurrentViewVersion(
+      MetadataUpdate.SetCurrentViewVersion expected, MetadataUpdate.SetCurrentViewVersion actual) {
+    Assertions.assertThat(actual.versionId()).isEqualTo(expected.versionId());
   }
 
   private String createManifestListWithManifestFiles(long snapshotId, Long parentSnapshotId)

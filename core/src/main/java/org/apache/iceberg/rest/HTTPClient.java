@@ -34,6 +34,8 @@ import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
 import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.io.HttpClientConnectionManager;
 import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.HttpHeaders;
@@ -71,6 +73,12 @@ public class HTTPClient implements RESTClient {
   @VisibleForTesting
   static final String CLIENT_GIT_COMMIT_SHORT_HEADER = "X-Client-Git-Commit-Short";
 
+  private static final String REST_MAX_RETRIES = "rest.client.max-retries";
+  private static final String REST_MAX_CONNECTIONS = "rest.client.max-connections";
+  private static final int REST_MAX_CONNECTIONS_DEFAULT = 100;
+  private static final String REST_MAX_CONNECTIONS_PER_ROUTE = "rest.client.connections-per-route";
+  private static final int REST_MAX_CONNECTIONS_PER_ROUTE_DEFAULT = 100;
+
   private final String uri;
   private final CloseableHttpClient httpClient;
   private final ObjectMapper mapper;
@@ -79,11 +87,24 @@ public class HTTPClient implements RESTClient {
       String uri,
       Map<String, String> baseHeaders,
       ObjectMapper objectMapper,
-      HttpRequestInterceptor requestInterceptor) {
+      HttpRequestInterceptor requestInterceptor,
+      Map<String, String> properties) {
     this.uri = uri;
     this.mapper = objectMapper;
 
     HttpClientBuilder clientBuilder = HttpClients.custom();
+
+    HttpClientConnectionManager connectionManager =
+        PoolingHttpClientConnectionManagerBuilder.create()
+            .useSystemProperties()
+            .setMaxConnTotal(Integer.getInteger(REST_MAX_CONNECTIONS, REST_MAX_CONNECTIONS_DEFAULT))
+            .setMaxConnPerRoute(
+                PropertyUtil.propertyAsInt(
+                    properties,
+                    REST_MAX_CONNECTIONS_PER_ROUTE,
+                    REST_MAX_CONNECTIONS_PER_ROUTE_DEFAULT))
+            .build();
+    clientBuilder.setConnectionManager(connectionManager);
 
     if (baseHeaders != null) {
       clientBuilder.setDefaultHeaders(
@@ -95,6 +116,9 @@ public class HTTPClient implements RESTClient {
     if (requestInterceptor != null) {
       clientBuilder.addRequestInterceptorLast(requestInterceptor);
     }
+
+    int maxRetries = PropertyUtil.propertyAsInt(properties, REST_MAX_RETRIES, 5);
+    clientBuilder.setRetryStrategy(new ExponentialHttpRequestRetryStrategy(maxRetries));
 
     this.httpClient = clientBuilder.build();
   }
@@ -466,7 +490,7 @@ public class HTTPClient implements RESTClient {
         interceptor = loadInterceptorDynamically(SIGV4_REQUEST_INTERCEPTOR_IMPL, properties);
       }
 
-      return new HTTPClient(uri, baseHeaders, mapper, interceptor);
+      return new HTTPClient(uri, baseHeaders, mapper, interceptor, properties);
     }
   }
 
