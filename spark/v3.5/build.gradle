@@ -17,7 +17,7 @@
  * under the License.
  */
 
-String sparkMajorVersion = '3.5'
+String sparkMajorVersion = '3.3'
 String scalaVersion = System.getProperty("scalaVersion") != null ? System.getProperty("scalaVersion") : System.getProperty("defaultScalaVersion")
 
 def sparkProjects = [

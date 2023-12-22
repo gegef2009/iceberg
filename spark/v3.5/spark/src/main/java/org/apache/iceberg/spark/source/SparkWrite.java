@@ -208,7 +208,12 @@ abstract class SparkWrite implements Write, RequiresDistributionAndOrdering {
     if (applicationId != null) {
       operation.set("spark.app.id", applicationId);
     }
-
+    if (System.getenv("UDP_USER") != null) {
+      operation.set("USER", System.getenv("UDP_USER"));
+    }
+    if (System.getenv("JOB_NAME") != null) {
+      operation.set("JOB", System.getenv("JOB_NAME"));
+    }
     if (!extraSnapshotMetadata.isEmpty()) {
       extraSnapshotMetadata.forEach(operation::set);
     }
